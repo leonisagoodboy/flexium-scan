@@ -3,6 +3,7 @@ import sqlite3
 import datetime
 import csv
 import traceback
+import os
 
 def main(page: ft.Page):
     try:
@@ -14,11 +15,14 @@ def main(page: ft.Page):
         page.window_height = 800
         page.bgcolor = "#F5F5F5"
         
-        # [移除] page.assets_dir 設定
-
         FLEX_GREEN = "#009140"
         FLEX_ORANGE = "#F37021"
-        db_path = "flexium_data.db"
+        
+        # [關鍵修正] 強制鎖定資料庫路徑，避免找不到檔案
+        # 使用 app 的內部儲存空間路徑
+        db_filename = "flexium_data.db"
+        # 在 Android 上，os.getcwd() 通常是內部私有目錄，這樣寫比較保險
+        db_path = os.path.join(os.getcwd(), db_filename) 
 
         # --- 2. 資料庫初始化 ---
         def init_db():
@@ -39,9 +43,6 @@ def main(page: ft.Page):
 
         # --- 3. UI 元件宣告 ---
 
-        # [移除] logo_img 元件
-
-        # 標題欄
         header_banner = ft.Container(
             content=ft.Row([
                 ft.Icon(name="qr_code_scanner", color="white", size=24),
@@ -52,7 +53,6 @@ def main(page: ft.Page):
             shadow=ft.BoxShadow(blur_radius=5, color="grey")
         )
 
-        # 輸入框
         txt_emp_id = ft.TextField(
             label="員工工號",
             hint_text="請掃描...",
@@ -77,7 +77,6 @@ def main(page: ft.Page):
             keyboard_type="number"
         )
 
-        # 狀態文字
         lbl_last_action = ft.Text("等待掃描...", size=16, color="grey", weight="bold")
         
         lv_history = ft.ListView(expand=True, spacing=10, padding=20)
@@ -123,7 +122,6 @@ def main(page: ft.Page):
                 lbl_last_action.color = "red"
                 page.update()
 
-        # 確認卡片
         confirm_card = ft.Container(
             padding=30,
             bgcolor="white",
@@ -156,7 +154,6 @@ def main(page: ft.Page):
             ])
         )
 
-        # 黑色遮罩層
         confirm_overlay = ft.Container(
             content=ft.Container(content=confirm_card, alignment=ft.alignment.center),
             bgcolor="#80000000", 
@@ -203,32 +200,35 @@ def main(page: ft.Page):
 
         def load_history():
             lv_history.controls.clear()
-            conn = sqlite3.connect(db_path)
-            cursor = conn.cursor()
-            cursor.execute("SELECT id, emp_id, amount, created_at FROM records ORDER BY id DESC")
-            rows = cursor.fetchall()
-            conn.close()
+            try:
+                conn = sqlite3.connect(db_path)
+                cursor = conn.cursor()
+                cursor.execute("SELECT id, emp_id, amount, created_at FROM records ORDER BY id DESC")
+                rows = cursor.fetchall()
+                conn.close()
 
-            if not rows:
-                lv_history.controls.append(ft.Text("尚無資料", color="grey", text_align="center"))
-            
-            for row in rows:
-                rec_id, emp, amt, time = row
-                card = ft.Container(
-                    content=ft.Row([
-                        ft.Column([
-                            ft.Text(f"工號: {emp}", weight="bold", size=16, color="black"),
-                            ft.Text(f"{time}", size=12, color="grey"),
-                        ]),
-                        ft.Text(f"${amt}", size=20, color=FLEX_ORANGE, weight="bold"),
-                    ], alignment="spaceBetween"),
-                    padding=15,
-                    bgcolor="white",
-                    border=ft.border.only(left=ft.BorderSide(5, FLEX_GREEN)),
-                    border_radius=ft.border_radius.only(top_right=10, bottom_right=10),
-                    shadow=ft.BoxShadow(blur_radius=3, color="grey")
-                )
-                lv_history.controls.append(card)
+                if not rows:
+                    lv_history.controls.append(ft.Text("尚無資料", color="grey", text_align="center"))
+                
+                for row in rows:
+                    rec_id, emp, amt, time = row
+                    card = ft.Container(
+                        content=ft.Row([
+                            ft.Column([
+                                ft.Text(f"工號: {emp}", weight="bold", size=16, color="black"),
+                                ft.Text(f"{time}", size=12, color="grey"),
+                            ]),
+                            ft.Text(f"${amt}", size=20, color=FLEX_ORANGE, weight="bold"),
+                        ], alignment="spaceBetween"),
+                        padding=15,
+                        bgcolor="white",
+                        border=ft.border.only(left=ft.BorderSide(5, FLEX_GREEN)),
+                        border_radius=ft.border_radius.only(top_right=10, bottom_right=10),
+                        shadow=ft.BoxShadow(blur_radius=3, color="grey")
+                    )
+                    lv_history.controls.append(card)
+            except Exception as e:
+                lv_history.controls.append(ft.Text(f"讀取錯誤: {e}", color="red"))
             page.update()
 
         def export_data(e):
@@ -243,11 +243,23 @@ def main(page: ft.Page):
                     cursor.execute("SELECT * FROM records")
                     rows = cursor.fetchall()
                     conn.close()
+                    
+                    # [關鍵修正] 加入 encoding='utf-8-sig' 確保 Excel 開啟中文不亂碼
                     with open(e.path, mode='w', newline='', encoding='utf-8-sig') as f:
                         writer = csv.writer(f)
+                        # 寫入標題
                         writer.writerow(['ID', '工號', '金額', '時間'])
+                        # 寫入內容
                         writer.writerows(rows)
-                    page.show_snack_bar(ft.SnackBar(content=ft.Text(f"匯出成功！"), bgcolor=FLEX_GREEN))
+                    
+                    # [關鍵] 告訴使用者到底匯出了幾筆，方便確認
+                    count = len(rows)
+                    msg = f"匯出成功！共 {count} 筆資料"
+                    if count == 0:
+                        msg = "匯出成功，但資料庫是空的！(請先掃描資料)"
+                        
+                    page.show_snack_bar(ft.SnackBar(content=ft.Text(msg), bgcolor=FLEX_GREEN))
+                    
                 except Exception as err:
                     page.show_snack_bar(ft.SnackBar(content=ft.Text(f"匯出失敗: {err}"), bgcolor="red"))
 
@@ -276,7 +288,6 @@ def main(page: ft.Page):
             divider_color="transparent",
             tabs=[
                 ft.Tab(text="掃描", icon="qr_code_scanner", content=ft.Column([
-                    # [移除] logo_img
                     header_banner,
                     ft.Container(
                         padding=20,
