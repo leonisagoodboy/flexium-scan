@@ -1,9 +1,8 @@
 import flet as ft
-import sqlite3
 import datetime
 import csv
 import traceback
-import os
+import io
 
 def main(page: ft.Page):
     try:
@@ -18,28 +17,34 @@ def main(page: ft.Page):
         FLEX_GREEN = "#009140"
         FLEX_ORANGE = "#F37021"
         
-        # [關鍵修正] 強制鎖定資料庫路徑，避免找不到檔案
-        # 使用 app 的內部儲存空間路徑
-        db_filename = "flexium_data.db"
-        # 在 Android 上，os.getcwd() 通常是內部私有目錄，這樣寫比較保險
-        db_path = os.path.join(os.getcwd(), db_filename) 
+        # 定義儲存的 Key
+        STORAGE_KEY = "flexium_scan_records"
 
-        # --- 2. 資料庫初始化 ---
-        def init_db():
-            conn = sqlite3.connect(db_path)
-            cursor = conn.cursor()
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS records (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    emp_id TEXT NOT NULL,
-                    amount INTEGER NOT NULL,
-                    created_at TEXT NOT NULL
-                )
-            """)
-            conn.commit()
-            conn.close()
+        # --- 2. 資料存取邏輯 (改用 client_storage) ---
+        
+        def get_all_records():
+            # 從手機內部儲存讀取列表，如果沒有則回傳空列表
+            data = page.client_storage.get(STORAGE_KEY)
+            if data is None:
+                return []
+            return data
 
-        init_db()
+        def add_record(emp_id, amount):
+            records = get_all_records()
+            new_record = {
+                "id": len(records) + 1,
+                "emp_id": emp_id,
+                "amount": int(amount),
+                "created_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            }
+            # 新資料插入在最前面 (顯示時會在最上面)
+            records.insert(0, new_record)
+            page.client_storage.set(STORAGE_KEY, records)
+            return new_record
+
+        def clear_all_records():
+            page.client_storage.remove(STORAGE_KEY)
+            load_history()
 
         # --- 3. UI 元件宣告 ---
 
@@ -93,20 +98,15 @@ def main(page: ft.Page):
             confirm_overlay.visible = False
             page.update()
 
-        def real_save_to_db(e):
+        def real_save_to_storage(e):
             confirm_overlay.visible = False
             
             emp_id = txt_emp_id.value.strip()
             amount_str = txt_amount.value.strip()
             
             try:
-                conn = sqlite3.connect(db_path)
-                cursor = conn.cursor()
-                dt = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                cursor.execute("INSERT INTO records (emp_id, amount, created_at) VALUES (?, ?, ?)", 
-                               (emp_id, int(amount_str), dt))
-                conn.commit()
-                conn.close()
+                # 儲存到 client_storage
+                add_record(emp_id, amount_str)
 
                 lbl_last_action.value = f"✅ 已儲存: {emp_id} - ${amount_str}"
                 lbl_last_action.color = FLEX_GREEN
@@ -118,7 +118,7 @@ def main(page: ft.Page):
                 load_history()
 
             except Exception as err:
-                lbl_last_action.value = f"❌ 錯誤: {err}"
+                lbl_last_action.value = f"❌ 儲存錯誤: {err}"
                 lbl_last_action.color = "red"
                 page.update()
 
@@ -147,7 +147,7 @@ def main(page: ft.Page):
                 
                 ft.Row([
                     ft.OutlinedButton("取消", on_click=close_overlay, width=100),
-                    ft.ElevatedButton("確認寫入", on_click=real_save_to_db, 
+                    ft.ElevatedButton("確認寫入", on_click=real_save_to_storage, 
                                       style=ft.ButtonStyle(bgcolor=FLEX_ORANGE, color="white"),
                                       width=120),
                 ], alignment="spaceBetween")
@@ -173,16 +173,8 @@ def main(page: ft.Page):
                 txt_emp_id.focus()
                 page.update()
                 return
-
-            if not amount_str:
-                lbl_last_action.value = "❌ 錯誤：金額是空的！"
-                lbl_last_action.color = "red"
-                txt_amount.focus()
-                page.update()
-                return
-
-            if not amount_str.isdigit():
-                lbl_last_action.value = f"❌ 錯誤：金額 '{amount_str}' 不是數字！"
+            if not amount_str or not amount_str.isdigit():
+                lbl_last_action.value = f"❌ 錯誤：金額異常"
                 lbl_last_action.color = "red"
                 txt_amount.focus()
                 page.update()
@@ -200,66 +192,70 @@ def main(page: ft.Page):
 
         def load_history():
             lv_history.controls.clear()
-            try:
-                conn = sqlite3.connect(db_path)
-                cursor = conn.cursor()
-                cursor.execute("SELECT id, emp_id, amount, created_at FROM records ORDER BY id DESC")
-                rows = cursor.fetchall()
-                conn.close()
+            rows = get_all_records()
 
-                if not rows:
-                    lv_history.controls.append(ft.Text("尚無資料", color="grey", text_align="center"))
-                
-                for row in rows:
-                    rec_id, emp, amt, time = row
-                    card = ft.Container(
-                        content=ft.Row([
-                            ft.Column([
-                                ft.Text(f"工號: {emp}", weight="bold", size=16, color="black"),
-                                ft.Text(f"{time}", size=12, color="grey"),
-                            ]),
-                            ft.Text(f"${amt}", size=20, color=FLEX_ORANGE, weight="bold"),
-                        ], alignment="spaceBetween"),
-                        padding=15,
-                        bgcolor="white",
-                        border=ft.border.only(left=ft.BorderSide(5, FLEX_GREEN)),
-                        border_radius=ft.border_radius.only(top_right=10, bottom_right=10),
-                        shadow=ft.BoxShadow(blur_radius=3, color="grey")
-                    )
-                    lv_history.controls.append(card)
-            except Exception as e:
-                lv_history.controls.append(ft.Text(f"讀取錯誤: {e}", color="red"))
+            if not rows:
+                lv_history.controls.append(ft.Text("尚無資料", color="grey", text_align="center"))
+            
+            for row in rows:
+                card = ft.Container(
+                    content=ft.Row([
+                        ft.Column([
+                            ft.Text(f"工號: {row['emp_id']}", weight="bold", size=16, color="black"),
+                            ft.Text(f"{row['created_at']}", size=12, color="grey"),
+                        ]),
+                        ft.Text(f"${row['amount']}", size=20, color=FLEX_ORANGE, weight="bold"),
+                    ], alignment="spaceBetween"),
+                    padding=15,
+                    bgcolor="white",
+                    border=ft.border.only(left=ft.BorderSide(5, FLEX_GREEN)),
+                    border_radius=ft.border_radius.only(top_right=10, bottom_right=10),
+                    shadow=ft.BoxShadow(blur_radius=3, color="grey")
+                )
+                lv_history.controls.append(card)
             page.update()
 
+        # --- 6. 匯出邏輯 (包含 CSV 存檔 + 複製到剪貼簿) ---
+
+        def generate_csv_string():
+            rows = get_all_records()
+            if not rows:
+                return None
+            
+            output = io.StringIO()
+            # 寫入 BOM 防止 Excel 亂碼
+            output.write('\ufeff') 
+            writer = csv.writer(output)
+            writer.writerow(['ID', '工號', '金額', '時間'])
+            for row in rows:
+                writer.writerow([row['id'], row['emp_id'], row['amount'], row['created_at']])
+            return output.getvalue()
+
+        def copy_to_clipboard(e):
+            csv_str = generate_csv_string()
+            if csv_str:
+                page.set_clipboard(csv_str)
+                page.show_snack_bar(ft.SnackBar(content=ft.Text("✅ 資料已複製到剪貼簿！"), bgcolor=FLEX_GREEN))
+            else:
+                page.show_snack_bar(ft.SnackBar(content=ft.Text("❌ 無資料可複製"), bgcolor="red"))
+
         def export_data(e):
+            rows = get_all_records()
+            if not rows:
+                page.show_snack_bar(ft.SnackBar(content=ft.Text("沒有資料可以匯出"), bgcolor="red"))
+                return
+            
             filename = f"FLEX_Export_{datetime.datetime.now().strftime('%Y%m%d_%H%M')}.csv"
             file_picker.save_file(dialog_title="匯出 CSV", file_name=filename)
 
         def on_save_file_result(e: ft.FilePickerResultEvent):
             if e.path:
                 try:
-                    conn = sqlite3.connect(db_path)
-                    cursor = conn.cursor()
-                    cursor.execute("SELECT * FROM records")
-                    rows = cursor.fetchall()
-                    conn.close()
+                    csv_content = generate_csv_string()
+                    with open(e.path, mode='w', encoding='utf-8') as f:
+                        f.write(csv_content)
                     
-                    # [關鍵修正] 加入 encoding='utf-8-sig' 確保 Excel 開啟中文不亂碼
-                    with open(e.path, mode='w', newline='', encoding='utf-8-sig') as f:
-                        writer = csv.writer(f)
-                        # 寫入標題
-                        writer.writerow(['ID', '工號', '金額', '時間'])
-                        # 寫入內容
-                        writer.writerows(rows)
-                    
-                    # [關鍵] 告訴使用者到底匯出了幾筆，方便確認
-                    count = len(rows)
-                    msg = f"匯出成功！共 {count} 筆資料"
-                    if count == 0:
-                        msg = "匯出成功，但資料庫是空的！(請先掃描資料)"
-                        
-                    page.show_snack_bar(ft.SnackBar(content=ft.Text(msg), bgcolor=FLEX_GREEN))
-                    
+                    page.show_snack_bar(ft.SnackBar(content=ft.Text(f"匯出成功！"), bgcolor=FLEX_GREEN))
                 except Exception as err:
                     page.show_snack_bar(ft.SnackBar(content=ft.Text(f"匯出失敗: {err}"), bgcolor="red"))
 
@@ -328,7 +324,7 @@ def main(page: ft.Page):
                         padding=15,
                         bgcolor=FLEX_GREEN,
                         content=ft.Row([
-                            ft.Text("歷史紀錄", size=18, color="white", weight="bold"),
+                            ft.Text("歷史紀錄 (本機儲存)", size=18, color="white", weight="bold"),
                             ft.IconButton(icon="refresh", icon_color="white", on_click=lambda e: load_history())
                         ], alignment="spaceBetween")
                     ),
@@ -343,20 +339,39 @@ def main(page: ft.Page):
                     ),
                     ft.Container(
                         padding=20,
-                        content=ft.Container(
-                            bgcolor="white",
-                            padding=20,
-                            border_radius=10,
-                            shadow=ft.BoxShadow(blur_radius=5, color="grey"),
-                            content=ft.Row([
-                                ft.Icon(name="file_download", color=FLEX_GREEN, size=30),
-                                ft.Column([
-                                    ft.Text("匯出 CSV", size=16, weight="bold"),
-                                    ft.Text("儲存至本機資料夾", size=12, color="grey"),
-                                ], expand=True),
-                                ft.IconButton(icon="arrow_forward_ios", icon_color=FLEX_ORANGE, on_click=export_data)
-                            ])
-                        )
+                        content=ft.Column([
+                            # 匯出檔案按鈕
+                            ft.Container(
+                                bgcolor="white",
+                                padding=20,
+                                border_radius=10,
+                                shadow=ft.BoxShadow(blur_radius=5, color="grey"),
+                                content=ft.Row([
+                                    ft.Icon(name="file_download", color=FLEX_GREEN, size=30),
+                                    ft.Column([
+                                        ft.Text("方法 1: 匯出 CSV 檔案", size=16, weight="bold"),
+                                        ft.Text("儲存至手機資料夾", size=12, color="grey"),
+                                    ], expand=True),
+                                    ft.IconButton(icon="arrow_forward_ios", icon_color=FLEX_ORANGE, on_click=export_data)
+                                ])
+                            ),
+                            ft.Container(height=20),
+                            # 複製剪貼簿按鈕 (備援方案)
+                            ft.Container(
+                                bgcolor="white",
+                                padding=20,
+                                border_radius=10,
+                                shadow=ft.BoxShadow(blur_radius=5, color="grey"),
+                                content=ft.Row([
+                                    ft.Icon(name="copy", color="#007bff", size=30),
+                                    ft.Column([
+                                        ft.Text("方法 2: 複製全部資料", size=16, weight="bold"),
+                                        ft.Text("複製文字，可直接貼到 Line/Email", size=12, color="grey"),
+                                    ], expand=True),
+                                    ft.IconButton(icon="content_copy", icon_color=FLEX_ORANGE, on_click=copy_to_clipboard)
+                                ])
+                            )
+                        ])
                     )
                 ])),
             ],
